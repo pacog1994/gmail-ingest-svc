@@ -17,19 +17,22 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && node dist/index.js",
-    "generate-auth-url": "tsc && node dist/auth/gmailAuthUrl.js",
-    "run-callback-server": "tsc && node dist/callBackServer.js",
+    "callback-server": "node dist/callBackServer.js",
+    "auth-url": "node dist/auth/gmailAuthUrl.js",
+    "generate-auth-url-flow": "tsc && concurrently --names  \"callback-server, auth\" --prefix-colors \"blue, green\" -s first \"npm run callback-server\" \"npm run auth-url\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "googleapis": "^170.1.0"
+    "googleapis": "^170.1.0",
+    "kafkajs": "^2.2.4"
   },
   "devDependencies": {
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.6",
     "@types/node": "^25.1.0",
+    "concurrently": "^9.2.1",
     "typescript": "^5.9.3"
   }
 }
