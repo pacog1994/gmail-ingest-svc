@@ -1,12 +1,20 @@
 
 import { Controller } from "./types";
 import { GmailClient } from "../gmail/gmailClient";
-import { NormalizedAttachment, NormalizedEmail } from "../models/normalized/email";
+import { NormalizedEmail } from "../models/normalized/email";
+import { IngestEvent } from "../models/events/event";
 import KafkaProducer from "../kafka-producer";
+import packageInfo from "../../package.json";
 import { getLastMessageIdFromCache, setLastMessageIdWithCache } from "../cache/historyIdStore";
-import { NormalizedThread } from "../models/normalized/thread";
+import { gmail_v1 } from "googleapis";
 
-// Helper to normalize a Gmail message (basic, can be extended)
+const client: gmail_v1.Gmail = GmailClient();
+
+/**
+ * Normalizes a gmail message to a simpler format for downstream services
+ * @param message the raw message from Gmail API
+ * @returns a simple email object
+ */
 function normalizeMessage(message: any): NormalizedEmail {
     const headers = (message.payload.headers || []).reduce((acc: any, h: any) => {
         acc[h.name.toLowerCase()] = h.value;
@@ -22,47 +30,53 @@ function normalizeMessage(message: any): NormalizedEmail {
         receivedAt: message.internalDate,
         labels: message.labelIds,
         hasAttachments: !!(message.payload.parts && message.payload.parts.some((p: any) => p.filename)),
-        attachments: [], // TODO: fill in with attachment fetching
         textBody: undefined, // TODO: extract text
         htmlBody: undefined // TODO: extract html
     };
 }
 
-function normalizeThread(thread: any): NormalizedThread {
-    return {} as NormalizedThread; // Placeholder, implement as needed
+/**
+ * Fetch user's gmail profile to get last history id
+ * @returns history id
+ */
+async function fetchLastHistoryIdFromProfile(): Promise<string> {
+    const profile = await client.users.getProfile({ userId: 'me' });
+    const historyId = profile.data.historyId?.toString();
+    if (!historyId) {
+        throw new Error('Could not get initial historyId');
+    }
+    return historyId;
 }
 
-function normalizeAttachments(attachments: any): NormalizedAttachment[] {
-    return [] as NormalizedAttachment[]; // Placeholder, implement as needed
-}
-
-export const ingestCheck: Controller = async (req, res) => {
+/**
+ * Fetch history delta since last history id to find new messaegs
+ * @param startHistoryId 
+ * @returns history delta response from Gmail API
+ */
+async function fetchHistoryDelta(startHistoryId: string): Promise<gmail_v1.Schema$ListHistoryResponse | undefined> {
     try {
-        const client = GmailClient();
-        let lastHistoryId = getLastMessageIdFromCache();
-        if (!lastHistoryId) {
-            // No historyId, get from profile
-            const profile = await client.users.getProfile({ userId: 'me' });
-            if (profile.data.historyId) {
-                setLastMessageIdWithCache(profile.data.historyId.toString());
-                lastHistoryId = profile.data.historyId.toString();
-            } else {
-                res.status(500).json({ error: 'Could not get initial historyId' });
-                return;
-            }
-        }
-
-        // Get history delta since lastHistoryId
         const historyDelta = await client.users.history.list({
             userId: 'me',
-            startHistoryId: lastHistoryId,
-            historyTypes: ['messageAdded'],
-            maxResults: 20
+            startHistoryId: startHistoryId,
+            historyTypes: ['messageAdded', 'labelAdded'],
+            maxResults: 50
         });
+        return historyDelta.data
+    } catch (error) {
+        console.error(`Error fetching history delta with startHistoryId: ${startHistoryId}: ${error}`);
+        return undefined;
+    }
+}
 
-        // Get added message IDs from history delta 
-        const history = historyDelta.data.history ?? [];
+/**
+ * Extracts and normalizes new messages from Gmail history delta
+ * @param history the history delta array from Gmail API response
+ * @returns array of emails
+ */
+async function extractNormalizedEmails(history: gmail_v1.Schema$History[] | undefined) {
+    try {
         const addedMessages: string[] = [];
+        if (!history) return [];
         for (const h of history) {
             if (h.messagesAdded) {
                 for (const m of h.messagesAdded) {
@@ -75,6 +89,7 @@ export const ingestCheck: Controller = async (req, res) => {
 
         // Retrieve and normalize each new message found via added message IDs
         const normalizedEmails: NormalizedEmail[] = [];
+
         for (const messageId of addedMessages) {
             const msgResp = await client.users.messages.get({ userId: 'me', id: messageId });
             const message = msgResp.data;
@@ -82,16 +97,81 @@ export const ingestCheck: Controller = async (req, res) => {
             // TODO: fetch attachments and thread if needed
             normalizedEmails.push(normalized);
         }
+        return normalizedEmails;
+    } catch (error) {
+        console.error("Error extracting normalized emails:", error);
+        return [];
+    }
+}
+
+/**
+ * Handler function to send emails to Kafka topic for downstream processing
+ * @param emails array of normalized emails to send
+ * @returns boolean indicating success or failure of send operation
+ */
+async function sendEmail(emails: NormalizedEmail[]): Promise<boolean> {
+    try {
+        if (emails.length === 0) {
+            // no new emails to send
+            return true
+        }
+
+        const producer = new KafkaProducer();
+        let lastHistoryId = getLastMessageIdFromCache();
+
+        await producer.connect();
+
+        let events: IngestEvent[] = []
+        for (const email of emails) {
+            const event: IngestEvent = {
+                type: "EMAIL_INGESTED",
+                gmailHistoryId: lastHistoryId || "",
+                email: email,
+                metadata: {
+                    ingestedAt: new Date().toISOString(),
+                    source: "gmail-ingest-svc",
+                    version: packageInfo.version
+                }
+            };
+            events.push(event);
+        }
+        await producer.send('gmail.emails', events)
+        await producer.disconnect();
+        return true;
+    } catch (error) {
+        console.error("Error sending emails:", error);
+        return false;
+    }
+
+}
+
+export const ingestCheck: Controller = async (req, res) => {
+    try {
+        let lastHistoryId = getLastMessageIdFromCache();
+        if (!lastHistoryId) {
+            lastHistoryId = await fetchLastHistoryIdFromProfile();
+            setLastMessageIdWithCache(lastHistoryId, false);
+        }
+
+        // Get history delta since lastHistoryId
+        const historyDelta = await fetchHistoryDelta(lastHistoryId);
+
+
+        // Get added message IDs from history delta 
+        const history = historyDelta?.history ?? [];
+
+        const normalizedEmails = await extractNormalizedEmails(history);
 
         // Optionally overwrite stored historyId to the latest based off successful retrievals of new messages
-        if (normalizedEmails.length > 0 && historyDelta.data.historyId) {
-            setLastMessageIdWithCache(historyDelta.data.historyId.toString(), true);
+        if (normalizedEmails.length > 0 && historyDelta?.historyId) {
+            setLastMessageIdWithCache(historyDelta?.historyId.toString(), true);
         }
-        const producer = new KafkaProducer();
-        await producer.connect();
-        await producer.send('gmail.emails', normalizedEmails)
-        await producer.disconnect();
-        res.status(200).json({ emails: normalizedEmails });
+
+        const sendResult = await sendEmail(normalizedEmails);
+
+        res.status(sendResult ? 200 : 500).json(normalizedEmails);
+
+
     } catch (error) {
         console.error("Error accessing Gmail API:", error);
         res.status(500).json({ error: 'Gmail ingest failed', details: error?.toString() });

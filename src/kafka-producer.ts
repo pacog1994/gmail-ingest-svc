@@ -1,4 +1,5 @@
 import { Kafka } from 'kafkajs';
+import { IngestEvent } from "./models/events/event";
 
 class KafkaProducer {
     kafka: Kafka;
@@ -16,10 +17,10 @@ class KafkaProducer {
         await this.producer.connect();
     }
 
-    async send(topic: string, messages: any[]) {
+    async send(topic: string, events: IngestEvent[]) {
         await this.producer.send({
             topic,
-            messages: messages.map(msg => ({ value: JSON.stringify(msg) }))
+            messages: events.map(event => ({ value: JSON.stringify(event) }))
         });
     }
 

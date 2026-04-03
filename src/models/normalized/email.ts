@@ -3,14 +3,6 @@ export interface EmailAddress {
     address: string;
 }
 
-export interface NormalizedAttachment {
-    id: string;
-    filename: string;
-    mimeType: string;
-    size: number;
-    data?: string;
-}
-
 export interface NormalizedEmail {
     id: string;
     threadId: string;
@@ -23,7 +15,6 @@ export interface NormalizedEmail {
     receivedAt?: string;
     labels?: string[];
     hasAttachments: boolean;
-    attachments?: NormalizedAttachment[];
     textBody?: string;
     htmlBody?: string;
 }

@@ -20,6 +20,6 @@ ingestion -> normalization -> storing (TBD) (possible S3 or Postgres Schema)
 - get /health
 
 # Backlog
-- [] Create step-by-step instructions for creating Google API credentials and setting up for use in gmail ingest svc
-- [] Refine event payload to Kafka
-- [] Create more robust valiation and error handling
+[] Create step-by-step instructions for creating Google API credentials and setting up for use in gmail ingest svc
+[x] Refine event payload to Kafka
+[] Create more robust validation and error handling
