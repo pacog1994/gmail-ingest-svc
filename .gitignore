@@ -14,11 +14,8 @@ dist/*
 .vscode/
 *.swp
 
-# misc
-data
-gmail_api_cache.json
-
-
-
+# sqlite database
+data/
+data/*
 
 
