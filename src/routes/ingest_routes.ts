@@ -1,7 +1,7 @@
 import { Router } from 'express';
+import { ingestCheck } from '../controllers/ingest_controller';
 
 const router = Router();
-
-// TODO 
+router.get('/', ingestCheck);
 
 export default router;

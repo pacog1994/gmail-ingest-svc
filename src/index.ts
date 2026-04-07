@@ -1,68 +1,71 @@
 import dotenv from "dotenv";
 import express from "express";
-import { getGmailClient } from "./gmail/gmailClient";
+//dependency imports
+import { initDB } from "./db/email_sqlite";
+import { buildKafka, getKafkaProducer } from "./kafka/kafka-producer";
+//routes
 import ingestRoutes from './routes/ingest_routes';
 import healthRoutes from './routes/health_routes';
-import eventRoutes from './routes/events_routes';
+//logger
+import { randomUUID } from "crypto";
+import { logger, pinoconfig } from "./logger/logger";
+import { asyncStore } from "./logger/async-context";
 
 dotenv.config();
 
-const app = express();
-const PORT = Number(process.env.PORT) || 3000;
-const gmail = getGmailClient();
+async function main() {
 
-let ghistoryId: string | undefined
+    const app = express();
+    const PORT = Number(process.env.PORT) || 3000;
 
-function getLastMessageId(): string | undefined {
-    return ghistoryId
+    app.use((req, res, next) => {
+        const requestId = randomUUID();
+        // Store requestID in context map for logging in downstream calls
+        asyncStore.run({ requestId, logger: pinoconfig.child({ requestId }) }, () => {
+            next();
+        })
+    })
+
+    //Build connections to service dependencies
+    await initDB();
+    await buildKafka();
+
+    app.use('/health', healthRoutes);
+    app.use('/ingest', ingestRoutes);
+
+    const server = app.listen(PORT, '127.0.0.1', () => {
+        logger.info({ event: `gmail-ingest-svc is running on port ${PORT}` });
+    });
+
+    const shutdown = async () => {
+        logger.info({ event: "Shutting down gmail-inget-svc..." });
+
+        try {
+            const producer = getKafkaProducer();
+            await producer.disconnect();
+            logger.info({ event: "Kafka producer disconnected" });
+        } catch (err) {
+            logger.error({ event: "Error disconnecting Kafka producer: ", error: err });
+        }
+
+        try {
+            server.close(() => {
+                logger.info({ event: "express server closed" });
+            });
+            process.exit(0);
+        } catch (err) {
+            logger.error({ event: "Error shutting down express server: ", error: err });
+            process.exit(1);
+        }
+    }
+
+    //event listeners for shutdown signals
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
 }
 
-function setLastMessageId(id: string) {
-    ghistoryId = id
-}
-
-app.use('/health', healthRoutes);
-app.use('/ingest', ingestRoutes);
-app.use('/events', eventRoutes);
-
-// app.use('/profile', async (req, res) => {
-//     try {
-//         gmail.users.getProfile({ userId: 'me' })
-//             .then(response => {
-//                 const { historyId } = response.data;
-//                 console.log("Profile Data\n", response.data)
-//                 if (historyId) {
-//                     setLastMessageId(historyId);
-//                 }
-//                 res.json(response.data)
-//             });
-//     } catch (error) {
-//         console.error("Error accessing Gmail API:", error);
-//     }
-// })
-
-// app.use('/history', async (req, res) => {
-//     try {
-//         const startHistoryId = getLastMessageId();
-//         const response = await gmail.users.history.list({
-//             labelId: 'INBOX',
-//             maxResults: 20,
-//             userId: 'me',
-//             startHistoryId: "10123973",
-//             historyTypes: ['messageAdded']
-//         })
-
-//         const history = response.data.history ?? []
-
-//         console.log("History List Data\n", response.data)
-//         res.json(history)
-
-//     } catch (error) {
-//         console.error(`Error getting history with ${getLastMessageId()}:`);
-//     }
-// });
-
-app.listen(PORT, '127.0.0.1', () => {
-    console.log(`gmail-ingest-svc is running on port ${PORT}`);
-});
+main().catch(err => {
+    logger.error({ event: "Error starting the service: ", error: err });
+    process.exit(1);
+})
 
